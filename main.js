@@ -108,7 +108,7 @@ const setupBlueBuilding = (mesh) => {
 };
 
 const loadModel = (fileName, setupAction) => {
-    loader.load(`../asset/${fileName}`, (gltf) => {
+    loader.load(`./asset/${fileName}`, (gltf) => {
         const model = gltf.scene;
         setupAction(model);
         scene.add(model);
