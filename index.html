@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>京都駅前モデル（編集機能付き）</title>
+    <style>
+        body { margin: 0; overflow: hidden; font-family: sans-serif; user-select: none; }
+        canvas { display: block; }
+        
+        /* 右クリックメニュー */
+        #context-menu {
+            position: absolute;
+            display: none;
+            background: rgba(0, 0, 0, 0.85);
+            color: white;
+            padding: 15px;
+            border-radius: 8px;
+            border: 1px solid #555;
+            width: 220px;
+            z-index: 100;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+            backdrop-filter: blur(5px);
+        }
+        #context-menu h3 { margin: 0 0 15px 0; font-size: 14px; color: #00ccff; border-bottom: 1px solid #444; padding-bottom: 5px; }
+        .control-group { margin-bottom: 12px; font-size: 13px; display: flex; align-items: center; }
+        .control-group label { width: 30px; font-weight: bold; color: #ddd; }
+        .control-group input { flex: 1; cursor: pointer; }
+        .control-group span { width: 50px; text-align: right; color: #00ccff; font-family: monospace; }
+        
+        #close-menu {
+            margin-top: 5px; width: 100%; padding: 6px; cursor: pointer;
+            background: #333; border: none; color: white; border-radius: 4px; transition: background 0.2s;
+        }
+        #close-menu:hover { background: #555; }
+
+        /* 移動距離表示用チップ */
+        #move-info {
+            position: absolute;
+            display: none;
+            background: rgba(0, 255, 128, 0.9);
+            color: #000;
+            padding: 8px 12px;
+            border-radius: 20px;
+            font-size: 13px;
+            font-weight: bold;
+            pointer-events: none;
+            z-index: 50;
+            white-space: nowrap;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.2);
+            transform: translate(-50%, -150%);
+        }
+
+        /* 操作説明パネル */
+        #help-panel {
+            position: absolute;
+            bottom: 20px;
+            right: 20px;
+            display: none;
+            background: rgba(0, 0, 0, 0.7);
+            color: #fff;
+            padding: 15px;
+            border-radius: 8px;
+            border-left: 4px solid #00ccff;
+            font-size: 13px;
+            line-height: 1.6;
+            pointer-events: none;
+            z-index: 40;
+        }
+        .key { font-weight: bold; color: #00ccff; margin-right: 5px; }
+
+        /* ★追加：初期表示に戻すボタン */
+        #reset-btn {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            padding: 10px 20px;
+            background: #222;
+            color: white;
+            border: 1px solid #555;
+            border-radius: 5px;
+            cursor: pointer;
+            z-index: 90;
+            font-size: 14px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.3);
+            transition: background 0.2s;
+        }
+        #reset-btn:hover { background: #444; }
+    </style>
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/examples/jsm/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+</head>
+<body>
+    <button id="reset-btn">初期表示に戻す</button>
+
+    <div id="move-info"></div>
+
+    <div id="help-panel">
+        <div><span class="key">左ドラッグ</span>位置移動 <br><small>(SHIFT+左ドラッグなら一方方向)</small></div>
+        <div style="margin-top:5px;"><span class="key">右クリック</span>建物寸法変更</div>
+    </div>
+
+    <div id="context-menu">
+        <h3>建物サイズ変更</h3>
+        <div class="control-group">
+            <label>幅</label> <input type="range" id="input-width" step="0.5" min="1" max="100"> <span id="val-w"></span>
+        </div>
+        <div class="control-group">
+            <label>奥</label> <input type="range" id="input-depth" step="0.5" min="1" max="100"> <span id="val-d"></span>
+        </div>
+        <div class="control-group">
+            <label>高</label> <input type="range" id="input-height" step="0.5" min="1" max="200"> <span id="val-h"></span>
+        </div>
+        <button id="close-menu">閉じる</button>
+    </div>
+
+    <script type="module" src="main.js"></script>
+</body>
+</html>
