@@ -6,7 +6,8 @@
     <title>京都駅前シミュレーター</title>
     <style>
         body { margin: 0; overflow: hidden; font-family: sans-serif; user-select: none; }
-        canvas { display: block; }
+        
+        #main-canvas { display: block; width: 100vw; height: 100vh; }
         
         /* 右クリックメニュー */
         #context-menu {
@@ -22,19 +23,63 @@
             box-shadow: 0 4px 6px rgba(0,0,0,0.3);
             backdrop-filter: blur(5px);
         }
-        #context-menu h3 { margin: 0 0 15px 0; font-size: 14px; color: #00ccff; border-bottom: 1px solid #444; padding-bottom: 5px; }
+        #context-menu h3 { 
+            margin: 0 0 15px 0; 
+            font-size: 14px; 
+            color: #00ccff; 
+            border-bottom: 1px solid #444; 
+            padding-bottom: 5px; 
+            cursor: grab;
+        }
+        #context-menu h3:active {
+            cursor: grabbing;
+        }
+
         .control-group { margin-bottom: 12px; font-size: 13px; display: flex; align-items: center; }
         .control-group label { width: 30px; font-weight: bold; color: #ddd; }
-        .control-group input { flex: 1; cursor: pointer; }
+        .control-group input, .control-group select { flex: 1; cursor: pointer; }
         .control-group span { width: 50px; text-align: right; color: #00ccff; font-family: monospace; }
         
+        /* ★追加：コメント入力欄のスタイル */
+        #input-comment {
+            width: 100%;
+            box-sizing: border-box;
+            background: #222;
+            color: #fff;
+            border: 1px solid #555;
+            border-radius: 4px;
+            padding: 5px;
+            margin-bottom: 10px;
+            resize: vertical; /* 縦方向のみリサイズ可 */
+            font-size: 12px;
+            font-family: sans-serif;
+        }
+        #input-comment:focus {
+            outline: none;
+            border-color: #00ccff;
+        }
+
         #close-menu {
             margin-top: 5px; width: 100%; padding: 6px; cursor: pointer;
             background: #333; border: none; color: white; border-radius: 4px; transition: background 0.2s;
         }
         #close-menu:hover { background: #555; }
 
-        /* 移動距離表示用チップ */
+        #duplicate-btn {
+            margin-top: 10px; width: 100%; padding: 6px; cursor: pointer;
+            background: #005588; border: none; color: white; border-radius: 4px; transition: background 0.2s;
+            font-weight: bold;
+        }
+        #duplicate-btn:hover { background: #0077aa; }
+
+        #delete-btn {
+            margin-top: 5px; width: 100%; padding: 6px; cursor: pointer;
+            background: #880000; border: none; color: white; border-radius: 4px; transition: background 0.2s;
+            font-weight: bold;
+        }
+        #delete-btn:hover { background: #aa0000; }
+
+        /* 移動距離表示用チップ（緑） */
         #move-info {
             position: absolute;
             display: none;
@@ -51,10 +96,28 @@
             transform: translate(-50%, -150%);
         }
 
+        /* ★追加：コメント表示用チップ（白） */
+        #comment-tooltip {
+            position: absolute;
+            display: none;
+            background: rgba(255, 255, 255, 0.95);
+            color: #000;
+            padding: 8px 12px;
+            border-radius: 6px;
+            font-size: 12px;
+            pointer-events: none;
+            z-index: 55; /* 緑チップより少し上 */
+            box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+            white-space: pre-wrap; /* 改行を反映 */
+            max-width: 200px;
+            border: 1px solid #ccc;
+            transform: translate(15px, 15px); /* マウスの右下に表示 */
+        }
+
         /* 操作説明パネル */
         #help-panel {
             position: absolute;
-            bottom: 20px;
+            bottom: 22vh; 
             right: 20px;
             display: none;
             background: rgba(0, 0, 0, 0.7);
@@ -69,23 +132,144 @@
         }
         .key { font-weight: bold; color: #00ccff; margin-right: 5px; }
 
-        /* ★追加：初期表示に戻すボタン */
-        #reset-btn {
+        /* 右上ボタン群 */
+        .top-buttons {
             position: absolute;
             top: 20px;
             right: 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            z-index: 90;
+        }
+        .top-btn {
             padding: 10px 20px;
             background: #222;
             color: white;
             border: 1px solid #555;
             border-radius: 5px;
             cursor: pointer;
-            z-index: 90;
             font-size: 14px;
             box-shadow: 0 2px 5px rgba(0,0,0,0.3);
             transition: background 0.2s;
+            text-align: center;
         }
-        #reset-btn:hover { background: #444; }
+        .top-btn:hover { background: #444; }
+        
+        #file-input { display: none; }
+
+        /* カメラ情報パネル */
+        #camera-info {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            background: rgba(0, 0, 0, 0.6);
+            color: #00ff00;
+            padding: 10px;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 12px;
+            line-height: 1.5;
+            pointer-events: none;
+            z-index: 90;
+            border: 1px solid #005500;
+        }
+
+        /* 画面下部の比較パネル */
+        #sub-view-panel {
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            width: 100%;
+            height: 20vh;
+            background: #111;
+            border-top: 2px solid #444;
+            display: flex;
+            justify-content: flex-start;
+            align-items: center;
+            gap: 10px;
+            padding: 5px 10px;
+            box-sizing: border-box;
+            z-index: 80;
+            overflow-x: auto;
+        }
+
+        .sub-cam-container {
+            height: 100%;
+            aspect-ratio: 4 / 3;
+            background: #000;
+            border: 1px solid #00ccff;
+            cursor: pointer;
+            transition: border-color 0.2s;
+            position: relative;
+            flex-shrink: 0;
+        }
+        .sub-cam-container:hover {
+            border-color: #ffffff;
+        }
+        .sub-cam-container canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+        }
+
+        #street-view {
+            height: 100%;
+            aspect-ratio: 4 / 3; 
+            background: #000;
+            border: 1px solid #555;
+            flex-shrink: 0;
+        }
+        #street-view img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            display: block;
+        }
+
+        #add-sub-btn {
+            height: 60%;
+            aspect-ratio: 1 / 1;
+            background: #222;
+            border: 2px dashed #555;
+            color: #555;
+            font-size: 30px;
+            font-weight: bold;
+            cursor: pointer;
+            border-radius: 8px;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-shrink: 0;
+        }
+        #add-sub-btn:hover {
+            border-color: #00ccff;
+            color: #00ccff;
+            background: #333;
+        }
+
+        .remove-sub-btn {
+            position: absolute;
+            top: 2px;
+            right: 2px;
+            width: 20px;
+            height: 20px;
+            background: red;
+            color: white;
+            border: none;
+            border-radius: 50%;
+            font-size: 12px;
+            font-weight: bold;
+            cursor: pointer;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            z-index: 10;
+        }
+        .sub-cam-container:hover .remove-sub-btn {
+            display: flex;
+        }
     </style>
     <script type="importmap">
         {
@@ -97,12 +281,26 @@
     </script>
 </head>
 <body>
-    <button id="reset-btn">初期表示に戻す</button>
+    <div class="top-buttons">
+        <button id="reset-btn" class="top-btn">初期表示に戻す</button>
+        <button id="save-btn" class="top-btn">💾 シーン保存</button>
+        <button id="load-btn" class="top-btn">📂 シーン読込</button>
+    </div>
+    
+    <input type="file" id="file-input" accept=".json">
+
+    <div id="camera-info">
+        Camera Pos: <br>
+        Target Pos: <br>
+        Dist: 
+    </div>
 
     <div id="move-info"></div>
+    <div id="comment-tooltip"></div>
 
     <div id="help-panel">
         <div><span class="key">左ドラッグ</span>位置移動 <br><small>(SHIFT+左ドラッグなら一方方向)</small></div>
+        <div><span class="key">右ドラッグ</span>視点平行移動</div>
         <div style="margin-top:5px;"><span class="key">右クリック</span>建物寸法変更</div>
     </div>
 
@@ -115,9 +313,27 @@
             <label>奥</label> <input type="range" id="input-depth" step="0.5" min="1" max="100"> <span id="val-d"></span>
         </div>
         <div class="control-group">
-            <label>高</label> <input type="range" id="input-height" step="0.5" min="1" max="200"> <span id="val-h"></span>
+            <label>高</label> 
+            <input type="range" id="input-height" min="0" max="3" step="1"> 
+            <span id="val-h"></span>
         </div>
+        
+        <div class="control-group" style="display:block;">
+            <label style="width:100%; display:block; margin-bottom:4px;">メモ</label>
+            <textarea id="input-comment" rows="3" placeholder="建物のメモを入力..."></textarea>
+        </div>
+
         <button id="close-menu">閉じる</button>
+        <button id="duplicate-btn">この建物を複製</button>
+        <button id="delete-btn">この建物を削除</button>
+    </div>
+
+    <div id="sub-view-panel">
+        <div id="fixed-sub-container" class="sub-cam-container"></div>
+        <div id="street-view">
+            <img src="./asset/kyoto_station1.jpg" alt="Street View">
+        </div>
+        <button id="add-sub-btn">＋</button>
     </div>
 
     <script type="module" src="main.js"></script>
