@@ -2,23 +2,176 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { DRACOLoader } from 'three/examples/jsm/loaders/DRACOLoader.js';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import { DecalGeometry } from 'three/examples/jsm/geometries/DecalGeometry.js';
+import * as BufferGeometryUtils from 'three/examples/jsm/utils/BufferGeometryUtils.js';
+
+// ==========================================
+// 0. ローディング管理と投影ロジック (追加)
+// ==========================================
+const loadingScreen = document.getElementById('loading-screen');
+const loadingText = document.getElementById('loading-text');
+const loadingProgress = document.getElementById('loading-progress');
+
+// 読み込み対象のIDリスト
+const targetIds = ['52353670', '52353671', '52353681'];
+
+// 読み込み状態を管理するオブジェクト
+const loadingStatus = {
+    grounds: {},   // 読み込まれた地盤モデル (ID: Mesh)
+    roads: {},     // 読み込まれた道路モデル (ID: Mesh)
+    baseRoadLoaded: false, // road.glb の読み込み状態
+    baseGroundLoaded: false // ground.glb の読み込み状態
+};
+
+// 全てのデータが揃ったかチェックする関数
+function checkAllLoaded() {
+    // 1. ターゲットIDの地盤と道路がすべて揃っているか
+    const allSpecificLoaded = targetIds.every(id => {
+        return loadingStatus.grounds[id] && loadingStatus.roads[id];
+    });
+
+    // 2. 基本データも揃っているか
+    const allBaseLoaded = loadingStatus.baseRoadLoaded && loadingStatus.baseGroundLoaded;
+
+    // 進捗表示の更新
+    let loadedCount = 0;
+    targetIds.forEach(id => {
+        if (loadingStatus.grounds[id]) loadedCount++;
+        if (loadingStatus.roads[id]) loadedCount++;
+    });
+    if (loadingStatus.baseRoadLoaded) loadedCount++;
+    if (loadingStatus.baseGroundLoaded) loadedCount++;
+    
+    const totalRequired = (targetIds.length * 2) + 2; // (地盤3 + 道路3) + 基本2
+    if (loadingProgress) {
+        loadingProgress.textContent = `データ読み込み中: ${loadedCount}/${totalRequired}`;
+    }
+
+    // すべて完了していたら画面を消す
+    if (allSpecificLoaded && allBaseLoaded) {
+        if (loadingProgress) loadingProgress.textContent = "地形適合完了。システムを開始します...";
+        setTimeout(() => {
+            if (loadingScreen) {
+                loadingScreen.style.opacity = '0';
+                setTimeout(() => { 
+                    loadingScreen.style.display = 'none'; 
+                }, 800);
+            }
+        }, 1000);
+    }
+}
+
+// 【修正後】道路を特定の地盤に投影する関数
+function projectRoadToGround(roadMesh, groundMesh, id) {
+    if (!roadMesh || !groundMesh) return;
+
+    console.log(`[投影開始] ID: ${id || "Base"}`);
+
+    // 最新の座標を強制更新
+    roadMesh.updateMatrixWorld(true);
+    groundMesh.updateMatrixWorld(true);
+
+    const roadRaycaster = new THREE.Raycaster();
+    const downDir = new THREE.Vector3(0, -1, 0);
+    let hitCount = 0;
+
+    roadMesh.traverse((child) => {
+        if (child.isMesh) {
+            // 中心座標を取得
+            child.geometry.computeBoundingBox();
+            const center = new THREE.Vector3();
+            child.geometry.boundingBox.getCenter(center);
+            
+            // ワールド座標に変換
+            const worldPos = center.clone().applyMatrix4(child.matrixWorld);
+            
+            // はるか上空(5000m)からレイを飛ばす
+            roadRaycaster.set(new THREE.Vector3(worldPos.x, 5000, worldPos.z), downDir);
+            
+            // 地盤のみと判定
+            const intersects = roadRaycaster.intersectObject(groundMesh, true);
+            
+            if (intersects.length > 0) {
+                const groundY = intersects[0].point.y;
+                const currentY = worldPos.y;
+
+                // ★重要：現在の高さとの「差分」を足すことで、元の高さ情報を壊さずに移動
+                const offset = (groundY + 0.15) - currentY; 
+                
+                child.position.y += offset;
+                child.updateMatrix();
+                hitCount++;
+            }
+        }
+    });
+    console.log(`[投影完了] ID: ${id} / 調整数: ${hitCount}`);
+}
+
+// 道路メッシュを1つに結合して軽量化する関数
+function optimizeRoads(roadGroup) {
+    const geometries = [];
+    
+    roadGroup.updateMatrixWorld(true);
+    
+    roadGroup.traverse((child) => {
+        if (child.isMesh) {
+            // ジオメトリを複製し、現在の位置・回転・サイズを焼き付ける（applyMatrix4）
+            const clonedGeom = child.geometry.clone();
+            clonedGeom.applyMatrix4(child.matrixWorld);
+            geometries.push(clonedGeom);
+        }
+    });
+
+    if (geometries.length === 0) return roadGroup;
+
+    // 全てのジオメトリを結合
+    const mergedGeometry = BufferGeometryUtils.mergeGeometries(geometries, false);
+    
+    // 結合した新しいメッシュを作成
+    const mergedMesh = new THREE.Mesh(mergedGeometry, roadMaterial);
+    
+    // 元のバラバラのデータを削除し、結合した1つだけを返す
+    console.log(`[軽量化] ${geometries.length}個の道路パーツを1つに結合しました`);
+    return mergedMesh;
+}
+
+
+// ==========================================
+// 1. グローバル変数・定数定義
+// ==========================================
+
+// 道路用のマテリアル
+const roadMaterial = new THREE.MeshBasicMaterial({
+    color: 0x888888, 
+    transparent: true,
+    opacity: 0.6,
+    side: THREE.DoubleSide,
+    // 埋まり防止設定（手前に描画）
+    polygonOffset: true,
+    polygonOffsetFactor: -4, 
+    polygonOffsetUnits: -4,
+    depthTest: true,
+    depthWrite: false
+});
 
 // --- UI要素 ---
 const menu = document.getElementById('context-menu');
 const moveInfo = document.getElementById('move-info');
-const commentTooltip = document.getElementById('comment-tooltip'); // ★追加
+const commentTooltip = document.getElementById('comment-tooltip');
 const helpPanel = document.getElementById('help-panel');
+const walkHelpPanel = document.getElementById('walk-help-panel');
 const cameraInfo = document.getElementById('camera-info');
 const resetBtn = document.getElementById('reset-btn');
 const saveBtn = document.getElementById('save-btn');
 const loadBtn = document.getElementById('load-btn');
+const walkModeBtn = document.getElementById('walk-mode-btn');
 const fileInput = document.getElementById('file-input');
 const duplicateBtn = document.getElementById('duplicate-btn');
 const deleteBtn = document.getElementById('delete-btn');
 const inputW = document.getElementById('input-width');
 const inputD = document.getElementById('input-depth');
 const inputH = document.getElementById('input-height');
-const inputComment = document.getElementById('input-comment'); // ★追加
+const inputComment = document.getElementById('input-comment');
 const valW = document.getElementById('val-w');
 const valD = document.getElementById('val-d');
 const valH = document.getElementById('val-h');
@@ -28,22 +181,56 @@ const subViewPanel = document.getElementById('sub-view-panel');
 const fixedSubContainer = document.getElementById('fixed-sub-container');
 const addSubBtn = document.getElementById('add-sub-btn');
 
+// リサイズハンドル
+const resizeHandle = document.getElementById('resize-handle');
+
+// 照準UI
+const crosshair = document.getElementById('crosshair');
+const aimHint = document.getElementById('aim-hint');
+
+// 地図切替ボタン
+const mapSwitchBtn = document.getElementById('map-switch-btn');
+let isZoningMapMode = false; 
+
+// 道路設定UI
+const roadUI = document.getElementById('road-ui');
+const roadColorPicker = document.getElementById('road-color-picker');
+const roadOpacitySlider = document.getElementById('road-opacity-slider');
+const roadOpacityVal = document.getElementById('road-opacity-val');
+
+// 用途地域図テクスチャの読み込み
+const textureLoader = new THREE.TextureLoader();
+const zoningTexture = textureLoader.load('./asset/youto_map.png');
+zoningTexture.flipY = false; 
+zoningTexture.colorSpace = THREE.SRGBColorSpace;
+
+// ウォークモードUI
+const walkContainer = document.getElementById('walk-container');
+const walkView = document.getElementById('walk-view');
+const walkPlayBtn = document.getElementById('walk-play-btn');
+const walkClearBtn = document.getElementById('walk-clear-btn');
+const walkProgressSlider = document.getElementById('walk-progress');
+const walkTensionSlider = document.getElementById('walk-tension');
+
 const heightSteps = [20, 31, 45, 60];
 
-// イベント伝播遮断（コメント入力欄でもホイールなどを無効化しないとカメラが動くため追加）
+// イベント伝播遮断
 const stopProp = (e) => e.stopPropagation();
 menu.addEventListener('pointerdown', stopProp);
 menu.addEventListener('pointermove', stopProp);
 menu.addEventListener('wheel', stopProp);
-// キー入力を伝播させない（誤操作防止）
 menu.addEventListener('keydown', stopProp);
 menu.addEventListener('keyup', stopProp);
-
 resetBtn.addEventListener('pointerdown', stopProp);
 saveBtn.addEventListener('pointerdown', stopProp);
 loadBtn.addEventListener('pointerdown', stopProp);
+walkModeBtn.addEventListener('pointerdown', stopProp);
+walkContainer.addEventListener('pointerdown', stopProp);
+mapSwitchBtn.addEventListener('pointerdown', stopProp);
+roadUI.addEventListener('pointerdown', stopProp);
+roadUI.addEventListener('pointermove', stopProp);
 
-// メニューのドラッグ移動機能
+// メニューのドラッグ移動
 const menuHeader = menu.querySelector('h3');
 let isMenuDragging = false;
 let menuDragOffset = { x: 0, y: 0 };
@@ -76,6 +263,9 @@ scene.background = new THREE.Color(0x222222);
 const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 10000);
 camera.position.set(200, 200, 200);
 
+// メインカメラはLayer 0とLayer 1を見る
+camera.layers.enable(1); 
+
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -90,7 +280,7 @@ controls.enableDamping = false;
 //  サブカメラ管理
 // ----------------------------------------------------
 
-const createFrustumMesh = (cam) => {
+const createFrustumMesh = (cam, color = 0xffff00) => {
     const fov = cam.fov;
     const aspect = cam.aspect;
     const far = cam.far;
@@ -107,7 +297,7 @@ const createFrustumMesh = (cam) => {
     geometry.setAttribute('position', new THREE.BufferAttribute(vertices, 3));
     geometry.setIndex(indices);
     const material = new THREE.MeshBasicMaterial({
-        color: 0xffff00, transparent: true, opacity: 0.15, side: THREE.DoubleSide, depthWrite: false
+        color: color, transparent: true, opacity: 0.15, side: THREE.DoubleSide, depthWrite: false
     });
     const mesh = new THREE.Mesh(geometry, material);
     mesh.position.copy(cam.position);
@@ -229,6 +419,257 @@ addSubBtn.addEventListener('click', () => {
 });
 
 
+// 3. ウォークモード用サブカメラ
+const walkCamera = new THREE.PerspectiveCamera(60, 4/3, 0.5, 2000);
+walkCamera.position.set(0, 100, 0); 
+
+const walkRenderer = new THREE.WebGLRenderer({ antialias: true });
+walkRenderer.setSize(300, 225); 
+walkRenderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+walkView.appendChild(walkRenderer.domElement);
+
+const walkHelperCam = walkCamera.clone();
+walkHelperCam.far = 30;
+walkHelperCam.updateProjectionMatrix();
+const walkHelper = new THREE.CameraHelper(walkHelperCam);
+scene.add(walkHelper);
+const walkFrustumMesh = createFrustumMesh(walkHelperCam, 0xff00ff);
+scene.add(walkFrustumMesh);
+
+walkView.addEventListener('click', () => {
+    camera.position.copy(walkCamera.position);
+    const direction = new THREE.Vector3(0, 0, -1).applyQuaternion(walkCamera.quaternion);
+    controls.target.copy(walkCamera.position).add(direction.multiplyScalar(20));
+    controls.update();
+});
+
+
+// ----------------------------------------------------
+//  ★カメラパス制御クラス
+// ----------------------------------------------------
+class CameraPathController {
+    constructor(scene, subCamera, groundModels, updateCallback) {
+        this.scene = scene;
+        this.subCamera = subCamera;
+        this.groundModels = groundModels;
+        this.updateCallback = updateCallback;
+
+        this.waypoints = [];
+        this.pins = [];
+        this.curve = null;
+        this.pathMesh = null;
+        this.currentMarker = null;
+        
+        this.cornerRadius = 5.0; 
+        this.isPlaying = false;
+        this.progress = 0;
+        
+        this.baseSpeed = 0.0005; 
+        this.slowSpeed = 0.00025; 
+
+        this.pinMaterial = new THREE.MeshBasicMaterial({ color: 0xff0000 });
+        this.pathMaterial = new THREE.MeshLambertMaterial({ color: 0xffff00 }); 
+
+        this.setupMarker();
+    }
+
+    setupMarker() {
+        const geometry = new THREE.ConeGeometry(3.0, 9.0, 16);
+        geometry.rotateX(Math.PI / 2); 
+        
+        const material = new THREE.MeshBasicMaterial({ color: 0x00ff00 });
+        this.currentMarker = new THREE.Mesh(geometry, material);
+        
+        this.currentMarker.layers.set(1);
+        
+        this.currentMarker.visible = false; 
+        this.scene.add(this.currentMarker);
+    }
+
+    handleClick(mousePosition, mainCamera) {
+        if (!this.groundModels || this.groundModels.length === 0) return;
+
+        const raycaster = new THREE.Raycaster();
+        raycaster.setFromCamera(mousePosition, mainCamera);
+        const intersects = raycaster.intersectObjects(this.groundModels, true);
+
+        if (intersects.length > 0) {
+            const hitPoint = intersects[0].point;
+            const waypoint = hitPoint.clone().add(new THREE.Vector3(0, 1.6, 0));
+            this.addWaypoint(waypoint);
+        }
+    }
+
+    addWaypoint(point) {
+        this.waypoints.push(point);
+
+        const geometry = new THREE.SphereGeometry(1.0, 16, 16);
+        const pin = new THREE.Mesh(geometry, this.pinMaterial);
+        
+        pin.layers.set(1);
+        
+        pin.position.copy(point);
+        this.scene.add(pin);
+        this.pins.push(pin);
+
+        if (this.waypoints.length === 1) {
+            this.subCamera.position.copy(point);
+            this.subCamera.lookAt(point.clone().add(new THREE.Vector3(0, 0, 1)));
+            
+            this.currentMarker.position.copy(point).add(new THREE.Vector3(0, 3.0, 0)); 
+            this.currentMarker.rotation.set(0, 0, 0); 
+            this.currentMarker.visible = true;
+        } else {
+            this.updateCurve();
+        }
+        
+        renderAll();
+    }
+
+    updateCurve() {
+        if (this.waypoints.length < 2) return;
+
+        this.curve = new THREE.CurvePath();
+        const points = this.waypoints;
+        const radius = this.cornerRadius;
+
+        for (let i = 0; i < points.length - 1; i++) {
+            const p0 = points[i];
+            const p1 = points[i + 1];
+            const p2 = points[i + 2];
+
+            if (p2) {
+                const vec1 = new THREE.Vector3().subVectors(p1, p0);
+                const vec2 = new THREE.Vector3().subVectors(p2, p1);
+                const limit = Math.min(vec1.length(), vec2.length()) * 0.5;
+                const r = Math.min(radius, limit);
+
+                const lineEnd = new THREE.Vector3().copy(p1).sub(vec1.normalize().multiplyScalar(r));
+                const curveEnd = new THREE.Vector3().copy(p1).add(vec2.normalize().multiplyScalar(r));
+
+                let lineStart;
+                if (i === 0) {
+                    lineStart = p0;
+                } else {
+                    const prevCurve = this.curve.curves[this.curve.curves.length - 1];
+                    lineStart = prevCurve.v2; 
+                }
+                
+                this.curve.add(new THREE.LineCurve3(lineStart, lineEnd));
+                this.curve.add(new THREE.QuadraticBezierCurve3(lineEnd, p1, curveEnd));
+            } else {
+                let lineStart;
+                if (i === 0) {
+                    lineStart = p0;
+                } else {
+                    const prevCurve = this.curve.curves[this.curve.curves.length - 1];
+                    lineStart = prevCurve.v2;
+                }
+                this.curve.add(new THREE.LineCurve3(lineStart, p1));
+            }
+        }
+
+        if (this.pathMesh) {
+            this.scene.remove(this.pathMesh);
+            this.pathMesh.geometry.dispose();
+        }
+
+        const geometry = new THREE.TubeGeometry(this.curve, this.waypoints.length * 20, 2.0, 8, false);
+        this.pathMesh = new THREE.Mesh(geometry, this.pathMaterial);
+        
+        this.pathMesh.layers.set(1);
+
+        this.scene.add(this.pathMesh);
+    }
+
+    setTension(val) {
+        this.cornerRadius = val * 20.0;
+        this.updateCurve();
+        renderAll();
+    }
+
+    undo() {
+        if (this.waypoints.length === 0) return;
+
+        this.waypoints.pop();
+        
+        const pin = this.pins.pop();
+        if (pin) {
+            this.scene.remove(pin);
+            pin.geometry.dispose();
+        }
+
+        if (this.waypoints.length < 2) {
+            if (this.pathMesh) {
+                this.scene.remove(this.pathMesh);
+                this.pathMesh.geometry.dispose();
+                this.pathMesh = null;
+                this.curve = null;
+            }
+            if (this.waypoints.length === 0) {
+                this.currentMarker.visible = false;
+            } else {
+                const lastPoint = this.waypoints[0];
+                this.subCamera.position.copy(lastPoint);
+                this.currentMarker.position.copy(lastPoint).add(new THREE.Vector3(0, 3.0, 0));
+            }
+        } else {
+            this.updateCurve();
+        }
+
+        this.progress = 0;
+        this.isPlaying = false;
+        
+        if (this.updateCallback) this.updateCallback();
+        renderAll();
+    }
+
+    update() {
+        if (!this.isPlaying || !this.curve) return;
+
+        let currentSpeed = this.baseSpeed;
+        const camPos = this.subCamera.position;
+        for (const p of this.waypoints) {
+            if (camPos.distanceTo(p) < 10.0) {
+                currentSpeed = this.slowSpeed; 
+                break;
+            }
+        }
+
+        this.progress += currentSpeed;
+        if (this.progress > 1.0) {
+            this.progress = 0;
+        }
+
+        this.applyPosition(this.progress);
+        if (this.updateCallback) this.updateCallback(this.progress);
+    }
+    
+    applyPosition(progress) {
+        if (!this.curve) return;
+        
+        const position = this.curve.getPoint(progress);
+        this.subCamera.position.copy(position);
+        
+        const markerPos = position.clone().add(new THREE.Vector3(0, 3.0, 0));
+        this.currentMarker.position.copy(markerPos);
+
+        const lookAtProgress = Math.min(progress + 0.001, 0.9999);
+        const lookAtPoint = this.curve.getPoint(lookAtProgress);
+        
+        this.subCamera.lookAt(lookAtPoint);
+
+        const markerLookAtPoint = lookAtPoint.clone().add(new THREE.Vector3(0, 3.0, 0));
+        this.currentMarker.lookAt(markerLookAtPoint);
+    }
+
+    togglePlay() {
+        this.isPlaying = !this.isPlaying;
+        return this.isPlaying;
+    }
+}
+
+
 // --- インタラクション変数 ---
 const raycaster = new THREE.Raycaster();
 const mouse = new THREE.Vector2();
@@ -244,6 +685,22 @@ let baseMeshes = [];
 const downRaycaster = new THREE.Raycaster();
 const downDirection = new THREE.Vector3(0, -1, 0);
 let groundModels = []; 
+let paintTargets = [];
+let projectiles = [];
+let isAiming = false; // エイム状態フラグ
+
+// ウォークモード管理
+let isWalkMode = false;
+const pathController = new CameraPathController(scene, walkCamera, groundModels, (progress) => {
+    if (progress !== undefined) {
+        walkProgressSlider.value = progress;
+    } else {
+        walkProgressSlider.value = 0;
+        walkPlayBtn.textContent = "▶ 再生";
+        walkPlayBtn.classList.remove('playing');
+    }
+});
+
 
 // --- 情報表示更新 ---
 const updateCameraInfo = () => {
@@ -252,10 +709,14 @@ const updateCameraInfo = () => {
     const dist = pos.distanceTo(tgt);
 
     let altText = '-';
-    if (groundModels.length > 0) {
-        const rayOrigin = new THREE.Vector3(pos.x, 1000, pos.z);
+        if (groundModels.length > 0) {
+        // 1000mだと山岳地帯などで足りない場合があるため2000m程度を推奨
+        const rayOrigin = new THREE.Vector3(pos.x, 2000, pos.z);
         downRaycaster.set(rayOrigin, downDirection);
+        // intersectObjects(..., true) は再帰探索のため重いので、
+        // 地盤モデルが少ない場合は直接指定する方が高速です。
         const hits = downRaycaster.intersectObjects(groundModels, true);
+
         if (hits.length > 0) {
             const groundY = hits[0].point.y;
             const diff = pos.y - groundY;
@@ -281,17 +742,23 @@ const updateCameraInfo = () => {
 const renderMain = () => {
     const hideThreshold = 2.0; 
 
+    // 固定サブ
     const distFixed = camera.position.distanceTo(fixedSubCamera.position);
     const isInsideFixed = distFixed < hideThreshold;
     fixedHelper.visible = !isInsideFixed;
     fixedFrustumMesh.visible = !isInsideFixed;
 
+    // 動的サブ
     dynamicSubCameras.forEach(dc => {
         const dist = camera.position.distanceTo(dc.camera.position);
         const isInside = dist < hideThreshold;
         dc.helper.visible = !isInside;
         dc.mesh.visible = !isInside;
     });
+
+    // ウォークサブ
+    walkHelper.visible = false;
+    walkFrustumMesh.visible = false;
 
     renderer.render(scene, camera);
     updateCameraInfo();
@@ -306,24 +773,37 @@ const renderSubViews = () => {
         m: dc.mesh.visible
     }));
 
+    const walkHVis = walkHelper.visible;
+    const walkMVis = walkFrustumMesh.visible;
+
     fixedHelper.visible = false;
     fixedFrustumMesh.visible = false;
     dynamicSubCameras.forEach(dc => {
         dc.helper.visible = false;
         dc.mesh.visible = false;
     });
+    walkHelper.visible = false;
+    walkFrustumMesh.visible = false;
 
+    // レンダリング実行
     fixedSubRenderer.render(scene, fixedSubCamera);
     dynamicSubCameras.forEach(dc => {
         dc.renderer.render(scene, dc.camera);
     });
+    
+    if (isWalkMode) {
+        walkRenderer.render(scene, walkCamera);
+    }
 
+    // 復元
     fixedHelper.visible = fixedHVis;
     fixedFrustumMesh.visible = fixedMVis;
     dynamicSubCameras.forEach((dc, i) => {
         dc.helper.visible = dynamicsVis[i].h;
         dc.mesh.visible = dynamicsVis[i].m;
     });
+    walkHelper.visible = walkHVis;
+    walkFrustumMesh.visible = walkMVis;
 };
 
 const renderAll = () => {
@@ -464,9 +944,18 @@ loader.load('./asset/buildings_60m.glb', (gltf) => {
 }, undefined, (err) => console.error(err));
 
 
+// setupStaticModelでuv1を明示的に取得
 const setupStaticModel = (model, color, edgeColor, isTexture = false) => {
     model.traverse((child) => {
         if (child.isMesh) {
+            // "uv1" がある場合、それをバックアップ
+            if (child.geometry.attributes.uv && child.geometry.attributes.uv1) {
+                child.userData.hasUV1 = true;
+                child.userData.uv0 = child.geometry.attributes.uv;  // 元のUV (航空写真)
+                child.userData.uv1 = child.geometry.attributes.uv1; // 2番目のUV (用途地域)
+                child.userData.originalMap = child.material.map; 
+            }
+
             if (isTexture && child.material) {
                 child.material = new THREE.MeshBasicMaterial({ map: child.material.map });
             } else {
@@ -477,28 +966,187 @@ const setupStaticModel = (model, color, edgeColor, isTexture = false) => {
     });
 };
 
-loadModel('buildings_static.glb', (m) => setupStaticModel(m, 0xffffff, 0x999999));
+loadModel('buildings_static.glb', (m) => {
+    setupStaticModel(m, 0xffffff, 0x999999);
+    m.traverse(c => { if(c.isMesh) paintTargets.push(c); });
+});
 loadModel('kyoto_tower.glb', (m) => setupStaticModel(m, null, null, true));
 loadModel('kyoto_station.glb', (m) => setupStaticModel(m, null, null, true));
 
-loadModel('ground.glb', (m) => { setupStaticModel(m, null, null, true); groundModels.push(m); });
-loadModel('ground52353681.glb', (m) => { setupStaticModel(m, null, null, true); groundModels.push(m); });
-loadModel('buildings_static52353681.glb', (m) => setupStaticModel(m, 0xffffff, 0x999999));
-loadModel('ground52353670.glb', (m) => { setupStaticModel(m, null, null, true); groundModels.push(m); });
-loadModel('buildings_static52353670.glb', (m) => setupStaticModel(m, 0xffffff, 0x999999));
-loadModel('ground52353671.glb', (m) => { setupStaticModel(m, null, null, true); groundModels.push(m); });
-loadModel('buildings_static52353671.glb', (m) => setupStaticModel(m, 0xffffff, 0x999999));
+// 1. 基本となる地盤のロード
+loader.load('./asset/ground.glb', (gltf) => {
+    setupStaticModel(gltf.scene, null, null, true);
+    scene.add(gltf.scene);
+    groundModels.push(gltf.scene);
+    
+    // 保存
+    loadingStatus.grounds['base'] = gltf.scene;
+    loadingStatus.baseGroundLoaded = true;
+
+    // もし基本道路が先にロードされていたら投影
+    if (loadingStatus.roads['base']) {
+        projectRoadToGround(loadingStatus.roads['base'], gltf.scene, 'base');
+    }
+
+    checkAllLoaded();
+}, undefined, err => console.error(err));
+
+// 2. 基本となる道路のロード
+loader.load('./asset/road.glb', (gltf) => {
+    gltf.scene.traverse(c => { if(c.isMesh) c.material = roadMaterial; });
+    scene.add(gltf.scene);
+    
+    // 保存
+    loadingStatus.roads['base'] = gltf.scene;
+    loadingStatus.baseRoadLoaded = true;
+
+    // もし基本地盤が先にロードされていたら投影
+    if (loadingStatus.grounds['base']) {
+        projectRoadToGround(gltf.scene, loadingStatus.grounds['base'], 'base');
+    }
+
+    checkAllLoaded();
+}, undefined, err => console.error(err));
+
+// 【修正後】ID付きの地盤と道路のロードとペアリング
+targetIds.forEach(id => {
+    
+    // A. 地盤のロード（マテリアル設定を強化）
+    loader.load(`./asset/ground${id}.glb`, (gltf) => {
+        const m = gltf.scene;
+        
+        m.traverse(child => {
+            if (child.isMesh) {
+                // UV2がある場合の処理（用途地域図用）
+                if (child.geometry.attributes.uv && child.geometry.attributes.uv1) {
+                    child.userData.hasUV1 = true;
+                    child.userData.uv0 = child.geometry.attributes.uv;
+                    child.userData.uv1 = child.geometry.attributes.uv1;
+                    child.userData.originalMap = child.material.map;
+                }
+
+                // ★修正箇所：テクスチャがない場合に透明になるのを防ぐ
+                if (child.material && child.material.map) {
+                    // テクスチャがあるならそれを使う
+                    child.material = new THREE.MeshBasicMaterial({ map: child.material.map });
+                } else {
+                    // テクスチャがないなら「グレー」で表示する（これで真っ黒/透明を回避）
+                    child.material = new THREE.MeshBasicMaterial({ color: 0x555555 });
+                }
+            }
+        });
+
+        scene.add(m);
+        groundModels.push(m);
+        loadingStatus.grounds[id] = m;
+        
+        // 道路が先に読み込まれていたら投影実行
+        if (loadingStatus.roads[id]) {
+            projectRoadToGround(loadingStatus.roads[id], m, id);
+        }
+        
+        checkAllLoaded();
+    }, undefined, err => console.error(`Ground${id} Load Error:`, err));
+
+    // B. 道路のロード（既存のまま）
+    loader.load(`./asset/road${id}.glb`, (gltf) => {
+        const m = gltf.scene;
+        m.traverse(c => { if(c.isMesh) c.material = roadMaterial; });
+        
+        // ★修正前：そのままシーンに追加していた
+        // scene.add(m);
+        // loadingStatus.roads[id] = m;
+
+        // もし対応する地盤が既にロードされていたら投影実行
+        if (loadingStatus.grounds[id]) {
+            projectRoadToGround(m, loadingStatus.grounds[id], id);
+            
+            // ★追加：投影「後」に結合して軽量化
+            const optimizedMesh = optimizeRoads(m);
+            scene.add(optimizedMesh);
+            loadingStatus.roads[id] = optimizedMesh; // 管理用も差し替え
+        } else {
+            // 地盤がまだの場合は一旦そのまま保存（後で投影時に結合する必要があるため、構造要検討）
+            // ※今回はシンプルに「地盤ロード時のコールバック」側でも optimizeRoads を呼ぶように修正が必要です
+            scene.add(m);
+            loadingStatus.roads[id] = m;
+        }
+        
+        checkAllLoaded();
+        
+    }, undefined, err => console.error(`Road${id} Load Error:`, err));
+    
+    // C. 建物のロード（既存のまま）
+    loadModel(`buildings_static${id}.glb`, (m) => {
+        setupStaticModel(m, 0xffffff, 0x999999);
+        m.traverse(c => { if(c.isMesh) paintTargets.push(c); });
+    });
+});
 
 
-// --- イベントリスナー ---
+// --- イベントリスナー (元コードの内容を維持) ---
+
+// ウォークモード切替
+walkModeBtn.addEventListener('click', () => {
+    isWalkMode = !isWalkMode;
+
+    if (isWalkMode) {
+        walkModeBtn.classList.add('active');
+        walkContainer.style.display = 'flex';
+        helpPanel.style.display = 'none';
+        walkHelpPanel.style.display = 'block';
+        
+        menu.style.display = 'none';
+        hoveredObject = null;
+        document.body.style.cursor = 'crosshair';
+        
+        const w = walkView.clientWidth;
+        const h = walkView.clientHeight;
+        walkRenderer.setSize(w, h);
+        walkCamera.aspect = w / h;
+        walkCamera.updateProjectionMatrix();
+
+    } else {
+        walkModeBtn.classList.remove('active');
+        walkContainer.style.display = 'none';
+        walkHelpPanel.style.display = 'none';
+        document.body.style.cursor = 'default';
+        pathController.isPlaying = false;
+        walkPlayBtn.classList.remove('playing');
+        walkPlayBtn.textContent = "▶ 再生";
+    }
+    renderAll();
+});
+
+// ウォークUIイベント
+walkPlayBtn.addEventListener('click', () => {
+    const playing = pathController.togglePlay();
+    if (playing) {
+        walkPlayBtn.textContent = "❚❚ 停止";
+        walkPlayBtn.classList.add('playing');
+    } else {
+        walkPlayBtn.textContent = "▶ 再生";
+        walkPlayBtn.classList.remove('playing');
+    }
+});
+walkClearBtn.addEventListener('click', () => {
+    pathController.undo();
+});
+walkTensionSlider.addEventListener('input', (e) => {
+    pathController.setTension(parseFloat(e.target.value));
+});
+walkProgressSlider.addEventListener('input', (e) => {
+    pathController.progress = parseFloat(e.target.value);
+    pathController.applyPosition(pathController.progress);
+    renderAll();
+});
+
 
 duplicateBtn.addEventListener('click', () => {
     if (!selectedObject) return;
     
     const tid = selectedObject.userData.templateId;
     const currentScale = selectedObject.scale.clone();
-    
-    // ★追加：コメントも引き継ぐ
     const currentComment = selectedObject.userData.comment;
 
     const newPos = selectedObject.position.clone();
@@ -506,8 +1154,6 @@ duplicateBtn.addEventListener('click', () => {
     newPos.z += 10;
 
     const newMesh = spawnInstance(tid, newPos, currentScale, false);
-    
-    // コメント適用
     if (currentComment) newMesh.userData.comment = currentComment;
 
     if (groundModels.length > 0) {
@@ -520,7 +1166,6 @@ duplicateBtn.addEventListener('click', () => {
             newMesh.position.y = 0;
         }
     }
-    
     updateObjectColor(newMesh);
     menu.style.display = 'none';
     renderAll();
@@ -528,24 +1173,15 @@ duplicateBtn.addEventListener('click', () => {
 
 deleteBtn.addEventListener('click', () => {
     if (!selectedObject) return;
-
     scene.remove(selectedObject);
-
     const index = blueBuildings.indexOf(selectedObject);
-    if (index > -1) {
-        blueBuildings.splice(index, 1);
-    }
-
-    if (selectedObject.material) {
-        selectedObject.material.dispose();
-    }
-
+    if (index > -1) blueBuildings.splice(index, 1);
+    if (selectedObject.material) selectedObject.material.dispose();
     selectedObject = null;
     hoveredObject = null;
     menu.style.display = 'none';
     document.body.style.cursor = 'default';
-    commentTooltip.style.display = 'none'; // 削除時はチップも消す
-
+    commentTooltip.style.display = 'none';
     renderAll();
 });
 
@@ -579,7 +1215,7 @@ saveBtn.addEventListener('click', () => {
             originalSize: b.userData.originalSize,
             isOriginal: b.userData.isOriginal,
             initialPosition: b.userData.initialPosition ? b.userData.initialPosition.toArray() : null,
-            comment: b.userData.comment // ★保存：コメント
+            comment: b.userData.comment 
         })),
         subCameras: dynamicSubCameras.map(dc => ({
             position: dc.camera.position.toArray(),
@@ -617,7 +1253,6 @@ fileInput.addEventListener('change', (e) => {
     reader.onload = (event) => {
         try {
             const data = JSON.parse(event.target.result);
-            
             if (!data.format || data.format !== 'kyoto-sim-data-v1') {
                 alert('このファイルは京都シミュレーターのデータではありません。');
                 fileInput.value = '';
@@ -641,18 +1276,13 @@ fileInput.addEventListener('change', (e) => {
                 data.buildings.forEach(bData => {
                     const pos = new THREE.Vector3().fromArray(bData.position);
                     const scl = new THREE.Vector3().fromArray(bData.scale);
-                    
                     const mesh = spawnInstance(bData.templateId, pos, scl, bData.isOriginal);
-                    
                     if (mesh) {
                         mesh.userData.originalSize = bData.originalSize;
                         if (bData.initialPosition) {
                             mesh.userData.initialPosition = new THREE.Vector3().fromArray(bData.initialPosition);
                         }
-                        // ★読込：コメント
-                        if (bData.comment) {
-                            mesh.userData.comment = bData.comment;
-                        }
+                        if (bData.comment) mesh.userData.comment = bData.comment;
                         updateObjectColor(mesh);
                     }
                 });
@@ -661,7 +1291,6 @@ fileInput.addEventListener('change', (e) => {
             while(dynamicSubCameras.length > 0) {
                 removeDynamicCamera(dynamicSubCameras[0]);
             }
-            
             if (data.subCameras) {
                 data.subCameras.forEach(camData => {
                     const pos = new THREE.Vector3().fromArray(camData.position);
@@ -673,7 +1302,6 @@ fileInput.addEventListener('change', (e) => {
             fileInput.value = '';
             renderAll();
             alert('読み込みが完了しました');
-
         } catch (err) {
             console.error(err);
             alert('ファイルの読み込みに失敗しました');
@@ -685,12 +1313,17 @@ fileInput.addEventListener('change', (e) => {
 
 // 1. マウス移動
 window.addEventListener('pointermove', (event) => {
+    if (isWalkMode) return;
+
     mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
     mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+    // ★追加：カメラ操作中（マウスボタン押下中）はホバー計算をスキップして負荷を下げる
+    if (event.buttons !== 0 && !isDragging) {
+        return; 
+    }
 
     // A. ドラッグ中の処理
     if (isDragging && selectedObject) {
-        // ドラッグ中はツールチップを消す
         commentTooltip.style.display = 'none';
 
         raycaster.setFromCamera(mouse, camera);
@@ -768,11 +1401,9 @@ window.addEventListener('pointermove', (event) => {
             needsRender = true;
         }
 
-        // ★追加：コメント表示ロジック
         if (hoveredObject && hoveredObject.userData.comment) {
             commentTooltip.style.display = 'block';
             commentTooltip.innerText = hoveredObject.userData.comment;
-            // マウスの右下に表示
             commentTooltip.style.left = event.clientX + 'px';
             commentTooltip.style.top = event.clientY + 'px';
         } else {
@@ -786,7 +1417,7 @@ window.addEventListener('pointermove', (event) => {
             hoveredObject = null;
             document.body.style.cursor = 'default';
             helpPanel.style.display = 'none';
-            commentTooltip.style.display = 'none'; // ホバー外れたら消す
+            commentTooltip.style.display = 'none'; 
             
             needsRender = true;
         }
@@ -798,6 +1429,19 @@ window.addEventListener('pointermove', (event) => {
 // 2. 左クリック
 window.addEventListener('pointerdown', (event) => {
     if (event.button !== 0) return;
+
+    if (document.pointerLockElement === document.body) {
+        shootPaint();
+        return; 
+    }
+
+    if (isWalkMode) {
+        mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+        mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+        pathController.handleClick(mouse, camera);
+        return;
+    }
+
     if (hoveredObject) {
         isDragging = true;
         selectedObject = hoveredObject;
@@ -817,14 +1461,15 @@ window.addEventListener('pointerdown', (event) => {
             menu.style.display = 'none';
             renderMain();
         }
-        // クリック時はツールチップを隠す（ドラッグの邪魔になるため）
         commentTooltip.style.display = 'none';
     }
 });
 
 window.addEventListener('pointerup', () => {
     isDragging = false;
-    controls.enabled = true;
+    if (document.pointerLockElement !== document.body) {
+        controls.enabled = true;
+    }
     if (moveInfo.style.display !== 'none') {
         moveInfo.style.display = 'none';
     }
@@ -833,6 +1478,7 @@ window.addEventListener('pointerup', () => {
 // 4. 右クリック
 window.addEventListener('contextmenu', (event) => {
     event.preventDefault();
+    if (isWalkMode || document.pointerLockElement === document.body) return; 
 
     if (hoveredObject) {
         selectedObject = hoveredObject;
@@ -859,16 +1505,13 @@ window.addEventListener('contextmenu', (event) => {
         inputH.value = closestIndex;
         valH.textContent = heightSteps[closestIndex].toFixed(1) + 'm';
 
-        // ★追加：コメントをフォームに反映
         inputComment.value = selectedObject.userData.comment || '';
 
         menu.style.display = 'block';
         menu.style.left = event.clientX + 'px';
         menu.style.top = event.clientY + 'px';
         
-        // メニューを開いた時もツールチップは邪魔なので消す
         commentTooltip.style.display = 'none';
-
     } else {
         if (menu.style.display !== 'none') {
             menu.style.display = 'none';
@@ -876,7 +1519,6 @@ window.addEventListener('contextmenu', (event) => {
     }
 });
 
-// ★追加：コメント入力イベント
 inputComment.addEventListener('input', () => {
     if (selectedObject) {
         selectedObject.userData.comment = inputComment.value;
@@ -922,7 +1564,8 @@ closeBtn.addEventListener('click', () => {
     menu.style.display = 'none';
 });
 
-window.addEventListener('resize', () => {
+// リサイズ処理を関数化
+const updateAllRenderers = () => {
     camera.aspect = window.innerWidth / window.innerHeight;
     camera.updateProjectionMatrix();
     renderer.setSize(window.innerWidth, window.innerHeight);
@@ -949,7 +1592,284 @@ window.addEventListener('resize', () => {
         }
     });
 
+    if (walkView.clientWidth && walkView.clientHeight) {
+        walkRenderer.setSize(walkView.clientWidth, walkView.clientHeight);
+        walkCamera.aspect = walkView.clientWidth / walkView.clientHeight;
+        walkCamera.updateProjectionMatrix();
+        walkHelperCam.aspect = walkCamera.aspect;
+        walkHelperCam.updateProjectionMatrix();
+        walkHelper.update();
+    }
+
+    renderAll();
+};
+
+window.addEventListener('resize', updateAllRenderers);
+
+
+// ハンドルのドラッグ処理
+let isResizingPanel = false;
+
+resizeHandle.addEventListener('pointerdown', (e) => {
+    isResizingPanel = true;
+    resizeHandle.classList.add('active');
+    document.body.style.cursor = 'row-resize';
+    e.preventDefault(); 
+});
+
+window.addEventListener('pointermove', (e) => {
+    if (!isResizingPanel) return;
+
+    let newHeight = window.innerHeight - e.clientY;
+    const minH = 100;
+    const maxH = window.innerHeight * 0.8;
+    
+    if (newHeight < minH) newHeight = minH;
+    if (newHeight > maxH) newHeight = maxH;
+
+    subViewPanel.style.height = newHeight + 'px';
+    updateAllRenderers();
+});
+
+window.addEventListener('pointerup', () => {
+    if (isResizingPanel) {
+        isResizingPanel = false;
+        resizeHandle.classList.remove('active');
+        document.body.style.cursor = 'default';
+    }
+});
+
+
+// ★追加：道路設定のリアルタイム反映（ファイルの末尾付近でも確実に動作するように定義）
+roadColorPicker.addEventListener('input', (e) => {
+    roadMaterial.color.set(e.target.value);
     renderAll();
 });
+
+roadOpacitySlider.addEventListener('input', (e) => {
+    const val = parseFloat(e.target.value);
+    roadMaterial.opacity = val;
+    roadOpacityVal.textContent = val.toFixed(2);
+    roadMaterial.visible = (val > 0);
+    renderAll();
+});
+
+
+// ==========================================
+// 11. ペンキ・デカール関連
+// ==========================================
+
+function createPaintTexture(baseHue) {
+    const size = 128;
+    const canvas = document.createElement('canvas');
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext('2d');
+
+    const centerBlobs = 15;
+    for (let i = 0; i < centerBlobs; i++) {
+        const radius = (Math.random() * 0.2 + 0.1) * size;
+        const x = size / 2 + (Math.random() - 0.5) * size * 0.4;
+        const y = size / 2 + (Math.random() - 0.5) * size * 0.4;
+        const hue = baseHue + (Math.random() - 0.5) * 60; 
+        ctx.beginPath();
+        ctx.arc(x, y, radius, 0, Math.PI * 2);
+        ctx.fillStyle = `hsl(${hue}, 100%, 60%)`;
+        ctx.fill();
+    }
+
+    const droplets = 30;
+    for (let i = 0; i < droplets; i++) {
+        const radius = (Math.random() * 0.05 + 0.01) * size;
+        const angle = Math.random() * Math.PI * 2;
+        const dist = (Math.random() * 0.3 + 0.2) * size;
+        const x = size / 2 + Math.cos(angle) * dist;
+        const y = size / 2 + Math.sin(angle) * dist;
+        const isAccent = Math.random() > 0.7;
+        const hue = isAccent ? (baseHue + 180) % 360 : baseHue + (Math.random() - 0.5) * 40;
+        
+        ctx.beginPath();
+        ctx.arc(x, y, radius, 0, Math.PI * 2);
+        ctx.fillStyle = `hsl(${hue}, 100%, 70%)`;
+        ctx.fill();
+    }
+
+    const texture = new THREE.CanvasTexture(canvas);
+    return texture;
+}
+
+function createDecal(hit, baseHue) {
+    const orientation = new THREE.Euler();
+    const m = new THREE.Matrix4();
+    m.lookAt(hit.point, hit.point.clone().add(hit.face.normal), new THREE.Vector3(0, 1, 0));
+    orientation.setFromRotationMatrix(m);
+    orientation.z = Math.random() * Math.PI * 2; 
+
+    const scale = 200; 
+    const size = new THREE.Vector3(scale, scale, scale);
+
+    const material = new THREE.MeshBasicMaterial({
+        map: createPaintTexture(baseHue),
+        transparent: true,
+        opacity: 0.9,
+        depthTest: true,
+        depthWrite: false,
+        polygonOffset: true,
+        polygonOffsetFactor: -4, 
+    });
+
+    paintTargets.forEach(target => {
+        const geometry = new DecalGeometry(target, hit.point, orientation, size);
+        if (geometry.attributes.position.count > 0) {
+            const decal = new THREE.Mesh(geometry, material);
+            scene.add(decal);
+        }
+    });
+}
+
+function shootPaint() {
+    raycaster.setFromCamera(new THREE.Vector2(0, 0), camera);
+    const intersects = raycaster.intersectObjects([...paintTargets, ...groundModels], true);
+
+    if (intersects.length > 0) {
+        const hit = intersects[0];
+        const baseHue = Math.random() * 360;
+        
+        const ballGeometry = new THREE.SphereGeometry(6, 16, 16); 
+        const ballMaterial = new THREE.MeshBasicMaterial({ color: `hsl(${baseHue}, 100%, 50%)` });
+        const ball = new THREE.Mesh(ballGeometry, ballMaterial);
+        
+        const startPos = new THREE.Vector3(0, -2, -5).applyQuaternion(camera.quaternion).add(camera.position);
+        ball.position.copy(startPos);
+        scene.add(ball);
+
+        projectiles.push({
+            mesh: ball,
+            targetPos: hit.point,
+            speed: 15.0, 
+            hitData: hit,
+            baseHue: baseHue
+        });
+    }
+}
+
+// FキーでPointerLock
+window.addEventListener('keydown', (event) => {
+    if (event.key === 'f' || event.key === 'F') {
+        if (document.pointerLockElement !== document.body) {
+            document.body.requestPointerLock();
+        } else {
+            document.exitPointerLock();
+        }
+    }
+});
+
+// PointerLockの状態変化イベント
+document.addEventListener('pointerlockchange', () => {
+    if (document.pointerLockElement === document.body) {
+        isAiming = true;
+        controls.enabled = false;
+        crosshair.style.display = 'block';
+        aimHint.style.display = 'block';
+    } else {
+        isAiming = false;
+        
+        const dir = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion).normalize();
+        const dist = camera.position.distanceTo(controls.target); 
+        controls.target.copy(camera.position).add(dir.multiplyScalar(dist));
+        
+        controls.enabled = true;
+        controls.update(); 
+        
+        crosshair.style.display = 'none';
+        aimHint.style.display = 'none';
+    }
+});
+
+// エイム中の視点移動
+document.addEventListener('mousemove', (event) => {
+    if (isAiming) {
+        const sensitivity = 0.002;
+        const euler = new THREE.Euler(0, 0, 0, 'YXZ');
+        euler.setFromQuaternion(camera.quaternion);
+
+        euler.y -= event.movementX * sensitivity;
+        euler.x -= event.movementY * sensitivity;
+        euler.x = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, euler.x));
+
+        camera.quaternion.setFromEuler(euler);
+        renderAll();
+    }
+});
+
+// 地図切り替え処理（UV入れ替えとテクスチャ差し替え）
+mapSwitchBtn.addEventListener('click', () => {
+    isZoningMapMode = !isZoningMapMode;
+    
+    if (isZoningMapMode) {
+        mapSwitchBtn.classList.add('active');
+        mapSwitchBtn.textContent = "🗺️ 用途地域";
+    } else {
+        mapSwitchBtn.classList.remove('active');
+        mapSwitchBtn.textContent = "🗺️ 航空写真";
+    }
+
+    groundModels.forEach(model => {
+        model.traverse(child => {
+            if (child.isMesh && child.userData.hasUV1) {
+                if (isZoningMapMode) {
+                    // 用途地域モード
+                    child.geometry.setAttribute('uv', child.userData.uv1);
+                    child.material.map = zoningTexture; 
+                } else {
+                    // 航空写真モード
+                    child.geometry.setAttribute('uv', child.userData.uv0);
+                    child.material.map = child.userData.originalMap; 
+                }
+                
+                child.geometry.attributes.uv.needsUpdate = true;
+                child.material.needsUpdate = true; 
+            }
+        });
+    });
+    
+    renderAll();
+});
+
+
+// ----------------------------------------------------------------
+// アニメーションループ
+// ----------------------------------------------------------------
+
+function animate() {
+    requestAnimationFrame(animate);
+    
+    if (projectiles.length > 0) {
+        for (let i = projectiles.length - 1; i >= 0; i--) {
+            const p = projectiles[i];
+            
+            const direction = new THREE.Vector3().subVectors(p.targetPos, p.mesh.position).normalize();
+            const distance = p.mesh.position.distanceTo(p.targetPos);
+            
+            if (distance < p.speed) {
+                createDecal(p.hitData, p.baseHue);
+                scene.remove(p.mesh);
+                p.mesh.geometry.dispose();
+                p.mesh.material.dispose();
+                projectiles.splice(i, 1);
+                renderAll(); 
+            } else {
+                p.mesh.position.add(direction.multiplyScalar(p.speed));
+                renderAll(); 
+            }
+        }
+    }
+    
+    if (isWalkMode && pathController.isPlaying) {
+        pathController.update();
+        renderAll();
+    }
+}
+animate();
 
 renderAll();

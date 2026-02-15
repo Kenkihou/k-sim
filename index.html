@@ -8,6 +8,33 @@
         body { margin: 0; overflow: hidden; font-family: sans-serif; user-select: none; }
         
         #main-canvas { display: block; width: 100vw; height: 100vh; }
+
+        /* ★変更：ローディング画面（z-indexを最大化し、操作をブロック） */
+        #loading-screen {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: #000;
+            color: #00ccff;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            z-index: 10000; /* 最前面 */
+            transition: opacity 0.8s;
+        }
+        .loader {
+            border: 5px solid #333;
+            border-top: 5px solid #00ccff;
+            border-radius: 50%;
+            width: 60px;
+            height: 60px;
+            animation: spin 1s linear infinite;
+            margin-bottom: 20px;
+        }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
         
         /* 右クリックメニュー */
         #context-menu {
@@ -40,7 +67,6 @@
         .control-group input, .control-group select { flex: 1; cursor: pointer; }
         .control-group span { width: 50px; text-align: right; color: #00ccff; font-family: monospace; }
         
-        /* ★追加：コメント入力欄のスタイル */
         #input-comment {
             width: 100%;
             box-sizing: border-box;
@@ -50,7 +76,7 @@
             border-radius: 4px;
             padding: 5px;
             margin-bottom: 10px;
-            resize: vertical; /* 縦方向のみリサイズ可 */
+            resize: vertical;
             font-size: 12px;
             font-family: sans-serif;
         }
@@ -96,7 +122,7 @@
             transform: translate(-50%, -150%);
         }
 
-        /* ★追加：コメント表示用チップ（白） */
+        /* コメント表示用チップ（白） */
         #comment-tooltip {
             position: absolute;
             display: none;
@@ -106,12 +132,12 @@
             border-radius: 6px;
             font-size: 12px;
             pointer-events: none;
-            z-index: 55; /* 緑チップより少し上 */
+            z-index: 55;
             box-shadow: 0 2px 8px rgba(0,0,0,0.3);
-            white-space: pre-wrap; /* 改行を反映 */
+            white-space: pre-wrap;
             max-width: 200px;
             border: 1px solid #ccc;
-            transform: translate(15px, 15px); /* マウスの右下に表示 */
+            transform: translate(15px, 15px);
         }
 
         /* 操作説明パネル */
@@ -131,6 +157,34 @@
             z-index: 40;
         }
         .key { font-weight: bold; color: #00ccff; margin-right: 5px; }
+
+        /* 照準マーク */
+        #crosshair {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            width: 80px; 
+            height: 80px;
+            transform: translate(-50%, -50%);
+            pointer-events: none;
+            display: none;
+            z-index: 100;
+        }
+        
+        #aim-hint {
+            position: absolute;
+            top: 60%;
+            left: 50%;
+            transform: translateX(-50%);
+            color: #00ff00;
+            font-weight: bold;
+            font-size: 14px;
+            text-shadow: 1px 1px 2px black;
+            pointer-events: none;
+            display: none;
+            z-index: 100;
+            text-align: center;
+        }
 
         /* 右上ボタン群 */
         .top-buttons {
@@ -155,7 +209,27 @@
             text-align: center;
         }
         .top-btn:hover { background: #444; }
+        .top-btn.active { background: #00ccff; color: #000; border-color: #00ccff; font-weight: bold; }
         
+        /* 道路設定パネル */
+        #road-ui {
+            position: absolute;
+            top: 280px; /* ボタン群の下に配置 */
+            right: 20px;
+            width: 150px;
+            background: rgba(0, 0, 0, 0.85);
+            padding: 12px;
+            border-radius: 8px;
+            border: 1px solid #555;
+            color: white;
+            z-index: 90;
+            font-size: 13px;
+        }
+        #road-ui h4 { margin: 0 0 10px 0; font-size: 14px; color: #aaaaff; border-bottom: 1px solid #444; padding-bottom: 4px;}
+        #road-ui label { display: block; margin-bottom: 4px; font-weight: bold;}
+        #road-ui input[type="color"] { width: 100%; height: 30px; cursor: pointer; border: none; padding: 0; }
+        #road-ui input[type="range"] { width: 100%; cursor: pointer; }
+
         #file-input { display: none; }
 
         /* カメラ情報パネル */
@@ -183,15 +257,31 @@
             width: 100%;
             height: 20vh;
             background: #111;
-            border-top: 2px solid #444;
             display: flex;
             justify-content: flex-start;
             align-items: center;
             gap: 10px;
             padding: 5px 10px;
+            padding-top: 8px; 
             box-sizing: border-box;
             z-index: 80;
             overflow-x: auto;
+        }
+
+        /* リサイズハンドル */
+        #resize-handle {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 6px;
+            background: #444;
+            cursor: row-resize;
+            z-index: 81;
+            transition: background 0.2s;
+        }
+        #resize-handle:hover, #resize-handle.active {
+            background: #00ccff;
         }
 
         .sub-cam-container {
@@ -270,6 +360,51 @@
         .sub-cam-container:hover .remove-sub-btn {
             display: flex;
         }
+
+        /* ウォークモード用のコンテナ（右端） */
+        #walk-container {
+            display: none; /* デフォルト非表示 */
+            height: 100%;
+            border: 1px solid #ffcc00;
+            background: #1a1a1a;
+            flex-shrink: 0;
+            margin-left: auto; /* 右寄せ */
+            flex-direction: row;
+        }
+        
+        #walk-view {
+            height: 100%;
+            aspect-ratio: 4 / 3;
+            background: #000;
+            cursor: pointer;
+        }
+        
+        #walk-controls {
+            width: 140px;
+            height: 100%;
+            padding: 5px 10px;
+            box-sizing: border-box;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            gap: 5px;
+            color: #fff;
+            font-size: 11px;
+            border-left: 1px solid #444;
+        }
+        #walk-controls h4 { margin: 0 0 5px 0; color: #ffcc00; font-size: 12px; }
+        
+        .walk-btn-row { display: flex; gap: 5px; }
+        .walk-btn {
+            flex: 1; padding: 4px; border: none; border-radius: 3px; cursor: pointer;
+            background: #444; color: white; font-size: 11px;
+        }
+        .walk-btn:hover { background: #666; }
+        #walk-play-btn { background: #008800; }
+        #walk-play-btn.playing { background: #880000; }
+        
+        #walk-controls input[type="range"] { width: 100%; cursor: pointer; }
+
     </style>
     <script type="importmap">
         {
@@ -281,10 +416,30 @@
     </script>
 </head>
 <body>
+    <div id="loading-screen">
+        <div class="loader"></div>
+        <div id="loading-text" style="font-size: 18px; letter-spacing: 2px;">データを読み込み、地形に適合させています...</div>
+        <div id="loading-progress" style="margin-top: 10px; font-family: monospace; color: #888;">初期化中...</div>
+    </div>
+
     <div class="top-buttons">
         <button id="reset-btn" class="top-btn">初期表示に戻す</button>
+        <button id="map-switch-btn" class="top-btn">🗺️ 地図切替</button>
         <button id="save-btn" class="top-btn">💾 シーン保存</button>
         <button id="load-btn" class="top-btn">📂 シーン読込</button>
+        <button id="walk-mode-btn" class="top-btn">🚶 ウォークモード</button>
+    </div>
+
+    <div id="road-ui">
+        <h4>道路設定</h4>
+        <div style="margin-bottom: 10px;">
+            <label>道路の色</label>
+            <input type="color" id="road-color-picker" value="#888888">
+        </div>
+        <div>
+            <label>透明度: <span id="road-opacity-val">0.6</span></label>
+            <input type="range" id="road-opacity-slider" min="0" max="1" step="0.05" value="0.6">
+        </div>
     </div>
     
     <input type="file" id="file-input" accept=".json">
@@ -302,6 +457,24 @@
         <div><span class="key">左ドラッグ</span>位置移動 <br><small>(SHIFT+左ドラッグなら一方方向)</small></div>
         <div><span class="key">右ドラッグ</span>視点平行移動</div>
         <div style="margin-top:5px;"><span class="key">右クリック</span>建物寸法変更</div>
+    </div>
+    
+    <div id="walk-help-panel" style="display:none; position:absolute; bottom:22vh; right:20px; background:rgba(0,0,0,0.7); color:#fff; padding:15px; border-radius:8px; border-left:4px solid #ffcc00; font-size:13px; z-index:40; pointer-events:none;">
+        <div style="color:#ffcc00; font-weight:bold; margin-bottom:5px;">[ ウォークモード中 ]</div>
+        <div><span class="key" style="color:#ffcc00;">地図クリック</span>ルート地点を追加</div>
+        <div><span class="key" style="color:#ffcc00;">再生ボタン</span>ルートを移動</div>
+    </div>
+
+    <div id="crosshair">
+        <svg width="80" height="80" viewBox="0 0 100 100">
+            <circle cx="50" cy="50" r="40" stroke="black" stroke-width="5" fill="none" opacity="0.8"/>
+            <line x1="50" y1="0" x2="50" y2="100" stroke="black" stroke-width="5" />
+            <line x1="0" y1="50" x2="100" y2="50" stroke="black" stroke-width="5" />
+            <circle cx="50" cy="50" r="5" fill="black" />
+        </svg>
+    </div>
+    <div id="aim-hint">
+        [左クリック] ペンキ発射 / [F] 終了
     </div>
 
     <div id="context-menu">
@@ -329,13 +502,30 @@
     </div>
 
     <div id="sub-view-panel">
+        <div id="resize-handle"></div>
+        
         <div id="fixed-sub-container" class="sub-cam-container"></div>
         <div id="street-view">
             <img src="./asset/kyoto_station1.jpg" alt="Street View">
         </div>
         <button id="add-sub-btn">＋</button>
-    </div>
 
+        <div id="walk-container">
+            <div id="walk-view"></div>
+            <div id="walk-controls">
+                <h4>Route Control</h4>
+                <div class="walk-btn-row">
+                    <button id="walk-play-btn" class="walk-btn">▶ 再生</button>
+                    <button id="walk-clear-btn" class="walk-btn">↶ ひとつ戻る</button>
+                </div>
+                <div style="margin-top:5px;">進行度</div>
+                <input type="range" id="walk-progress" min="0" max="1" step="0.001" value="0">
+                <div style="margin-top:5px;">コーナー半径</div>
+                <input type="range" id="walk-tension" min="0" max="1" step="0.1" value="0.25">
+            </div>
+        </div>
+    </div>
+    
     <script type="module" src="main.js"></script>
 </body>
 </html>
