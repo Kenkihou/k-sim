@@ -203,7 +203,7 @@ const roadOpacityVal = document.getElementById('road-opacity-val');
 const textureLoader = new THREE.TextureLoader();
 
 // 2. 読み込みを開始し、コールバックで結果を受け取る
-textureLoader.load('asset/youto_map.png', (loadedTexture) => {
+textureLoader.load('./asset/youto_map.png', (loadedTexture) => {
     // 3. 読み込みが終わったら、上で宣言したグローバル変数に代入
     zoningTexture = loadedTexture; 
     
