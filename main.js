@@ -263,8 +263,9 @@ scene.background = new THREE.Color(0x222222);
 const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 10000);
 camera.position.set(200, 200, 200);
 
-// メインカメラはLayer 0とLayer 1を見る
-camera.layers.enable(1); 
+// メインカメラは全てのレイヤー（0と1）を表示
+camera.layers.enable(0);
+camera.layers.enable(1);
 
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setSize(window.innerWidth, window.innerHeight);
@@ -310,6 +311,8 @@ const fixedSubCamera = new THREE.PerspectiveCamera(45, 4/3, 1, 5000);
 fixedSubCamera.position.set(-17.1, 30.3, -121.3);
 const fixedTarget = new THREE.Vector3(-68.0, 31.7, -131.5);
 fixedSubCamera.lookAt(fixedTarget);
+// ★ここに追記：サブカメラはレイヤー0（建物など）のみを表示し、レイヤー1（ラベル）を無視する
+fixedSubCamera.layers.set(0);
 
 const fixedSubRenderer = new THREE.WebGLRenderer({ antialias: true });
 fixedSubRenderer.setSize(fixedSubContainer.clientWidth, fixedSubContainer.clientHeight);
@@ -1835,6 +1838,203 @@ mapSwitchBtn.addEventListener('click', () => {
     
     renderAll();
 });
+
+
+// ==========================================
+// ★完成版：OSM建物名表示（優先順位付き・種別フィルター実装）
+// ==========================================
+
+function fetchAndShowBuildingNames() {
+    console.log("ローカルのOSMデータから建物名を表示します...");
+
+    const OFFSET_X = -75;
+    const OFFSET_Z = -180;
+    const centerLat = 34.98755; 
+    const centerLon = 135.75922;
+
+    // 外部APIではなく、assetフォルダ内のJSONファイルを読み込む
+    fetch('./asset/osm_data.json')
+        .then(response => {
+            if (!response.ok) throw new Error("JSONファイルが見つかりません。asset/osm_data.jsonを確認してください。");
+            return response.json();
+        })
+        .then(data => {
+            console.log(`データ読み込み完了: ${data.elements.length} 件`);
+            createNameLabelsFinal(data.elements, centerLat, centerLon, OFFSET_X, OFFSET_Z);
+        })
+        .catch(err => {
+            console.error("OSM表示エラー:", err);
+            // ファイルがない場合やエラー時は、もう一度だけAPI試行するなどのバックアップも可能
+        });
+}
+
+// ==========================================
+// ★最終修正版：重複エラー解消 & 地盤判定の強制強化
+// ==========================================
+
+function createNameLabelsFinal(elements, centerLat, centerLon, offsetX, offsetZ) {
+    const TEXT_SCALE = 0.24; // 2倍の大きさ
+    const LABEL_OFFSET_Y = 10; 
+    const CHECK_DIST = 30; // 重なり防止距離を調整
+
+    // ■ 除外リスト
+    const ignoreNames = ["京都", "下京区", "京都市", "京都駅前", "公衆トイレ", "自動販売機", "Bus Stop", "駐車場", "Times", "Entry", "Exit"];
+    
+    // ■ 優先キーワード（ホテルをここに含めます）
+    const priorityKeywords = ["ニデック", "京都タワー", "ホテル", "Hotel", "旅館", "通", "大路", "小路", "警察", "消防", "役所", "ビル"];
+
+    // ■ カテゴリ除外（飲食店・ショップを排除）
+    const excludeTypes = {
+        amenity: ["restaurant", "cafe", "fast_food", "bar", "pub", "izakaya", "vending_machine", "bench", "parking", "bicycle_parking", "toilets"],
+        shop: true, 
+        tourism: ["guest_house", "information"] // ホテルは除外しない
+    };
+
+    // ソート：ホテルやニデックを最優先
+    elements.sort((a, b) => {
+        const nameA = a.tags.name || "";
+        const nameB = b.tags.name || "";
+        const getPriority = (n) => {
+            if (n.includes("ニデック") || n.includes("京都タワー")) return 100;
+            for (const key of priorityKeywords) { if (n.includes(key)) return 10; }
+            return 0;
+        };
+        return getPriority(nameB) - getPriority(nameA); 
+    });
+
+    const labelGroup = new THREE.Group();
+    // ★重要：グループ全体をレイヤー1に設定（サブカメラから隠すため）
+    labelGroup.layers.set(1); 
+    scene.add(labelGroup);
+
+    // (中略: メッシュ収集・Raycaster設定は既存のまま)
+    const targetObjects = [];
+    scene.traverse(obj => {
+        if (obj.isMesh) {
+            const n = (obj.name || "").toLowerCase();
+            if (!n.includes("label") && !n.includes("line") && !n.includes("sprite")) targetObjects.push(obj);
+        }
+    });
+
+    const raycaster = new THREE.Raycaster();
+    if (typeof camera !== 'undefined') raycaster.camera = camera;
+    const placedLabels = []; 
+
+    elements.forEach(el => {
+        if (!el || !el.tags || !el.tags.name) return;
+        const name = el.tags.name;
+        const t = el.tags;
+
+        // フィルタリング
+        if (ignoreNames.some(ng => name.includes(ng))) return;
+        if (excludeTypes.shop === true && t.shop && !["department_store", "mall"].includes(t.shop)) return;
+        if (t.amenity && excludeTypes.amenity.includes(t.amenity)) return;
+        if (t.tourism && excludeTypes.tourism.includes(t.tourism)) return;
+
+        const lat = el.lat || (el.center && el.center.lat);
+        const lon = el.lon || (el.center && el.center.lon);
+        if (lat === undefined || lon === undefined) return;
+
+        const x = (lon - centerLon) * 91000 + offsetX;
+        const z = -(lat - centerLat) * 111000 + offsetZ;
+
+        if (placedLabels.some(item => Math.sqrt((item.x - x) ** 2 + (item.z - z) ** 2) < CHECK_DIST)) return;
+
+        // 高さ判定
+        let groundY = 0;
+        if (targetObjects.length > 0) {
+            targetObjects.forEach(obj => obj.updateMatrixWorld());
+            raycaster.set(new THREE.Vector3(x, 1000, z), new THREE.Vector3(0, -1, 0));
+            const intersects = raycaster.intersectObjects(targetObjects, true);
+            if (intersects.length > 0) {
+                let maxY = -Infinity;
+                intersects.forEach(hit => { if (hit.point.y > maxY) maxY = hit.point.y; });
+                groundY = maxY;
+            }
+        }
+        
+        groundY = Math.max(0, groundY); 
+        const pinTopY = groundY + LABEL_OFFSET_Y;
+
+        // --- 描画（ピンとスプライト） ---
+        const isStreet = name.includes("通") || name.includes("大路");
+        
+        const line = new THREE.Line(
+            new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(x, groundY, z), new THREE.Vector3(x, pinTopY, z)]),
+            new THREE.LineBasicMaterial({ color: isStreet ? 0xffaa00 : 0x00ffff, transparent: true, opacity: 0.5 })
+        );
+        // ★各パーツもレイヤー1に
+        line.layers.set(1); 
+        labelGroup.add(line);
+
+        const sprite = createTextSpriteHQ(name);
+        sprite.scale.multiplyScalar(TEXT_SCALE);
+        sprite.position.set(x, pinTopY + 2, z); 
+        // ★ラベルもレイヤー1に
+        sprite.layers.set(1); 
+        labelGroup.add(sprite);
+
+        placedLabels.push({ name, x, z });
+    });
+    renderAll();
+}
+
+// 確実に文字を出すための関数（これがないとエラーになります）
+function createTextSpriteHQ(message) {
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    const fontSize = 42;
+    ctx.font = `bold ${fontSize}px sans-serif`;
+    const textWidth = ctx.measureText(message).width;
+    
+    const padding = 15;
+    canvas.width = textWidth + padding * 2;
+    canvas.height = fontSize + padding * 2;
+    
+    // 背景
+    ctx.fillStyle = "rgba(0, 20, 50, 0.8)";
+    ctx.strokeStyle = "rgba(0, 255, 255, 0.9)";
+    ctx.lineWidth = 4;
+    
+    // 角丸の描画（roundRect関数を呼び出し）
+    roundRect(ctx, 0, 0, canvas.width, canvas.height, 10);
+    ctx.fill();
+    ctx.stroke();
+    
+    // 文字
+    ctx.fillStyle = "white";
+    ctx.font = `bold ${fontSize}px sans-serif`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(message, canvas.width / 2, canvas.height / 2);
+    
+    const texture = new THREE.CanvasTexture(canvas);
+    const material = new THREE.SpriteMaterial({ map: texture, depthTest: false });
+    const sprite = new THREE.Sprite(material);
+    sprite.scale.set(canvas.width * 0.5, canvas.height * 0.5, 1);
+    return sprite;
+}
+
+// Canvasで角丸四角形を描く補助関数
+function roundRect(ctx, x, y, width, height, radius) {
+    ctx.beginPath();
+    ctx.moveTo(x + radius, y);
+    ctx.lineTo(x + width - radius, y);
+    ctx.quadraticCurveTo(x + width, y, x + width, y + radius);
+    ctx.lineTo(x + width, y + height - radius);
+    ctx.quadraticCurveTo(x + width, y + height, x + width - radius, y + height);
+    ctx.lineTo(x + radius, y + height);
+    ctx.quadraticCurveTo(x, y + height, x, y + height - radius);
+    ctx.lineTo(x, y + radius);
+    ctx.quadraticCurveTo(x, y, x + radius, y);
+    ctx.closePath();
+}
+
+// 既存の即時実行は削除し、ロード完了を待つ5秒後の1回だけに絞る
+setTimeout(() => {
+    console.log("5秒経過：建物名の配置を開始します...");
+    fetchAndShowBuildingNames();
+}, 5000);
 
 
 // ----------------------------------------------------------------
