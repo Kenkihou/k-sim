@@ -191,6 +191,7 @@ const aimHint = document.getElementById('aim-hint');
 // 地図切替ボタン
 const mapSwitchBtn = document.getElementById('map-switch-btn');
 let isZoningMapMode = false; 
+let zoningTexture;
 
 // 道路設定UI
 const roadUI = document.getElementById('road-ui');
@@ -198,11 +199,24 @@ const roadColorPicker = document.getElementById('road-color-picker');
 const roadOpacitySlider = document.getElementById('road-opacity-slider');
 const roadOpacityVal = document.getElementById('road-opacity-val');
 
-// 用途地域図テクスチャの読み込み
+// テクスチャ読み込み（コールバックで確実に代入）
 const textureLoader = new THREE.TextureLoader();
-const zoningTexture = textureLoader.load('./asset/youto_map.png');
-zoningTexture.flipY = false; 
-zoningTexture.colorSpace = THREE.SRGBColorSpace;
+textureLoader.load('asset/youto_map.png', (loadedTexture) => {
+    // グローバル変数に代入
+    zoningTexture = loadedTexture; 
+    
+    // 設定の適用
+    zoningTexture.flipY = false;
+    zoningTexture.colorSpace = THREE.SRGBColorSpace;
+    zoningTexture.needsUpdate = true;
+    
+    console.log("youto_map.png の読み込みと代入が完了しました");
+    
+    // もし既にメッシュが作成されている場合に備えて再描画
+    if (typeof renderAll === 'function') renderAll();
+}, undefined, (err) => {
+    console.error("テクスチャ読み込みエラー:", err);
+});
 
 // ウォークモードUI
 const walkContainer = document.getElementById('walk-container');
